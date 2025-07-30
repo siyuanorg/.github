@@ -41,7 +41,9 @@ jobs:
       - name: Run Security Analysis
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # AI Analysis is disabled - using pattern-based detection only
+          # Optional: Add Gemini API key if you want AI-enhanced analysis
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # For now, pattern-based detection only (AI support coming soon)
           ENABLE_AI_ANALYSIS: 'false'
           MAX_COMMENTS_PER_PR: 25
         run: |
