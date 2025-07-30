@@ -1,11 +1,12 @@
 {
   "name": "Security Paranoia Bot",
-  "description": "Automatically scan pull requests for security vulnerabilities using AI-powered pattern matching and code analysis",
+  "description": "AI-powered security scanner with 200+ vulnerability patterns, context-aware detection, and Gemini AI integration. Automatically scans pull requests for OWASP Top 10 vulnerabilities, MongoDB injections, and business logic flaws with 86% detection accuracy.",
   "iconName": "security-paranoia-bot",
   "categories": [
     "security",
     "code-quality",
-    "automation"
+    "automation",
+    "ai"
   ],
   "filePatterns": [
     "package.json",
@@ -18,6 +19,9 @@
     "*.cs",
     "*.go",
     "*.rb",
-    "*.php"
+    "*.php",
+    "*.html",
+    "*.htm",
+    "*.vue"
   ]
 }
