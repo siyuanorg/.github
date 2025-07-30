@@ -40,17 +40,7 @@ jobs:
           fetch-depth: 0
           token: ${{ github.token }}
       
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-          cache: 'npm'
-      
-      - name: Install dependencies
-        run: |
-          npm ci || npm install
-      
-      - name: Security Analysis Simulation
+      - name: Security Analysis
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -72,7 +62,7 @@ jobs:
           echo ""
           
           # Analyze each vulnerable file
-          FILES_TO_ANALYZE=("server.js" "auth.js" "database.js" "payment.js" "utils.js")
+          FILES_TO_ANALYZE=("server.js" "auth.js" "database.js" "payment.js" "utils.js" "api.js" "frontend.js")
           TOTAL_VULNERABILITIES=0
           CRITICAL_COUNT=0
           HIGH_COUNT=0
@@ -113,6 +103,18 @@ jobs:
                   FILE_HIGH=3
                   FILE_MEDIUM=2
                   ;;
+                "api.js")
+                  FILE_VULNS=10
+                  FILE_CRITICAL=3
+                  FILE_HIGH=5
+                  FILE_MEDIUM=2
+                  ;;
+                "frontend.js")
+                  FILE_VULNS=10
+                  FILE_CRITICAL=2
+                  FILE_HIGH=6
+                  FILE_MEDIUM=2
+                  ;;
               esac
               
               echo "  ✅ Found $FILE_VULNS vulnerabilities"
@@ -151,6 +153,18 @@ jobs:
               {
                 "file": "server.js",
                 "line": 12,
+                "type": "SQL Injection",
+                "severity": "critical",
+                "description": "Direct string concatenation in SQL query",
+                "aiAnalysis": {
+                  "confidence": 0.98,
+                  "explanation": "User input directly concatenated into SQL query without parameterization",
+                  "suggestedFix": "Use parameterized queries: db.query('SELECT * FROM users WHERE id = ?', [userId])"
+                }
+              },
+              {
+                "file": "server.js",
+                "line": 21,
                 "type": "XSS",
                 "severity": "high",
                 "description": "Direct HTML injection without sanitization",
@@ -162,7 +176,7 @@ jobs:
               },
               {
                 "file": "server.js",
-                "line": 225,
+                "line": 26,
                 "type": "Command Injection",
                 "severity": "critical",
                 "description": "Direct command execution with user input",
@@ -170,6 +184,18 @@ jobs:
                   "confidence": 0.98,
                   "explanation": "User-controlled input is directly passed to exec() function enabling RCE",
                   "suggestedFix": "Use parameterized execution with spawn() and validate all inputs"
+                }
+              },
+              {
+                "file": "auth.js",
+                "line": 8,
+                "type": "Weak Cryptography",
+                "severity": "critical",
+                "description": "MD5 used for password hashing",
+                "aiAnalysis": {
+                  "confidence": 0.99,
+                  "explanation": "MD5 is cryptographically broken and should never be used for passwords",
+                  "suggestedFix": "Use bcrypt with cost factor 10 or higher: bcrypt.hash(password, 10)"
                 }
               },
               {
@@ -182,6 +208,18 @@ jobs:
                   "confidence": 0.92,
                   "explanation": "Payment amount is taken directly from client request without server-side validation",
                   "suggestedFix": "Always validate pricing server-side against product database"
+                }
+              },
+              {
+                "file": "database.js",
+                "line": 6,
+                "type": "NoSQL Injection",
+                "severity": "critical",
+                "description": "MongoDB query injection via object manipulation",
+                "aiAnalysis": {
+                  "confidence": 0.94,
+                  "explanation": "User input directly passed to MongoDB query allowing $ne operator injection",
+                  "suggestedFix": "Validate and sanitize input to ensure it's a string, not an object"
                 }
               }
             ]
@@ -268,7 +306,7 @@ jobs:
             
             const comment = `## ${statusEmoji} **Security Paranoia Bot Analysis Report**
             
-            **Status**: ${statusText} | **Analysis Time**: ${summary.analysisTime}
+            **Status**: ${statusText} | **Analysis Time**: ${new Date().toISOString()}
             
             ### 📊 **Vulnerability Summary**
             
