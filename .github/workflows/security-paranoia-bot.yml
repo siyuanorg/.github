@@ -363,7 +363,7 @@ jobs:
               {
                 template: (vuln) => `### 🚨 ${vuln.severity.toUpperCase()} SECURITY ALERT: ${vuln.type}
             
-            **Issue Description:**
+            **Issue in line above:**
             ${vuln.message}
             
             **Security Impact:** ${vuln.severity === 'critical' ? 'This critical vulnerability can lead to complete system compromise.' : vuln.severity === 'high' ? 'This high-risk vulnerability can expose sensitive data or functionality.' : 'This vulnerability may have moderate security impact.'}
@@ -381,7 +381,7 @@ jobs:
             
             **Severity Level:** ${vuln.severity.charAt(0).toUpperCase() + vuln.severity.slice(1)}
             
-            **Technical Details:**
+            **Problem with the line above:**
             ${vuln.message}
             
             **Remediation:**
@@ -395,7 +395,7 @@ jobs:
               {
                 template: (vuln) => `🔥 **SECURITY ISSUE DETECTED**
             
-            I've identified a ${vuln.severity}-severity security vulnerability in this code:
+            I've identified a ${vuln.severity}-severity security vulnerability in the code above:
             
             **Problem:** ${vuln.type} vulnerability
             **Details:** ${vuln.message}
@@ -411,7 +411,7 @@ jobs:
               {
                 template: (vuln) => `## Security Review Finding
             
-            During my analysis, I discovered a ${vuln.type} vulnerability with ${vuln.severity} severity.
+            During my analysis, I discovered a ${vuln.type} vulnerability with ${vuln.severity} severity in the preceding line.
             
             **Vulnerability Analysis:**
             ${vuln.message}
@@ -425,7 +425,7 @@ jobs:
                 weight: 2
               },
               {
-                template: (vuln) => `🛡️ **Security Concern Identified**
+                template: (vuln) => `🛡️ **Security Concern Identified Above**
             
             **Type:** ${vuln.type}  
             **Risk Level:** ${vuln.severity.toUpperCase()}
@@ -443,7 +443,7 @@ jobs:
               {
                 template: (vuln) => `### Security Scanner Alert
             
-            **Detected Issue:** ${vuln.type}
+            **Detected Issue:** ${vuln.type} on the line above
             **Severity Classification:** ${vuln.severity}
             
             **Problem Description:**
@@ -460,7 +460,7 @@ jobs:
               {
                 template: (vuln) => `🔍 **Vulnerability Assessment Result**
             
-            I found a potential security issue during code analysis:
+            I found a potential security issue in the preceding line during code analysis:
             
             - **Vulnerability:** ${vuln.type}
             - **Risk Rating:** ${vuln.severity.toUpperCase()}
@@ -504,18 +504,21 @@ jobs:
                 const template = getRandomTemplate();
                 const comment = template(vuln);
                 
+                // Comment AFTER the vulnerable line (line + 1) to provide context about what was just seen
                 allComments.push({
                   path: filename,
-                  line: vuln.line,
+                  line: vuln.line + 1, // Position comment AFTER the vulnerable line
                   side: 'RIGHT',
                   body: comment,
-                  vuln: vuln
+                  vuln: vuln,
+                  originalLine: vuln.line // Keep track of original line for logging
                 });
               }
             }
             
             const totalComments = allComments.length;
             console.log(`Posting ${totalComments} vulnerability comments (ALL detected vulnerabilities as requested)`);
+            console.log('Comments will be positioned AFTER each vulnerable line (not on the line itself)');
             
             if (totalComments === 0) {
               console.log('No vulnerabilities found in PR files');
@@ -562,12 +565,12 @@ jobs:
                   });
                   
                   const commentNumber = i + index + 1;
-                  console.log(`✅ [${commentNumber}/${totalComments}] Posted comment on ${comment.path}:${comment.line} (${comment.vuln.severity} ${comment.vuln.type})`);
+                  console.log(`✅ [${commentNumber}/${totalComments}] Posted comment after ${comment.path}:${comment.originalLine} (${comment.vuln.severity} ${comment.vuln.type})`);
                   return { success: true, comment };
                   
                 } catch (error) {
                   const commentNumber = i + index + 1;
-                  console.error(`❌ [${commentNumber}/${totalComments}] Failed to comment on ${comment.path}:${comment.line}: ${error.message}`);
+                  console.error(`❌ [${commentNumber}/${totalComments}] Failed to comment after ${comment.path}:${comment.originalLine}: ${error.message}`);
                   return { success: false, comment, error: error.message };
                 }
               });
@@ -601,7 +604,7 @@ jobs:
             console.log(`📈 Success rate: ${successRate}%`);
             
             if (successfulComments > 0) {
-              console.log('\n🎯 Successfully posted inline comments on ALL detected vulnerabilities!');
+              console.log('\n🎯 Successfully posted inline comments AFTER all detected vulnerable lines!');
             } else if (failedComments > 0) {
               console.log('\n⚠️ All vulnerability comments failed to post. This might be due to abuse detection or API limits.');
               console.log('Consider running the workflow again later or checking for API rate limits.');
