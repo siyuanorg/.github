@@ -286,18 +286,18 @@ jobs:
             
             ### 🔍 **Detailed Analysis**
             
-            The Security Paranoia Bot has added **inline comments** on each vulnerable line of code with:
+            The Security Paranoia Bot has added **inline comments** on critical vulnerabilities with:
             - Specific vulnerability description
             - Security impact explanation
             - Recommended fix with code examples
             
-            Please review all inline comments in the "Files changed" tab above.
+            Please review inline comments in the "Files changed" tab. For the complete vulnerability list, check the workflow artifacts.
             
             ---
             
             > 🤖 **Security Paranoia Bot** powered by SiYuan Organization
             > 
-            > 📊 **Analysis Details**: ${summary.totalVulnerabilities} vulnerabilities found with line-by-line annotations
+            > 📊 **Analysis Details**: ${summary.totalVulnerabilities} vulnerabilities found (${summary.critical} critical reviewed inline)
             > 
             > 🔗 **View Full Report**: Check the workflow artifacts for detailed analysis
             `;
@@ -316,7 +316,7 @@ jobs:
               });
             }
       
-      - name: Post Inline Code Reviews
+      - name: Post Critical Vulnerability Comments
         if: always() && (github.event_name == 'pull_request' || inputs.pr_number)
         uses: actions/github-script@v7
         with:
@@ -358,19 +358,91 @@ jobs:
             
             const prFiles = new Set(files.data.map(f => f.filename));
             
-            // Process vulnerabilities in batches to avoid rate limits
-            const BATCH_SIZE = 10;
-            const DELAY_MS = 1000; // 1 second delay between batches
+            // Comment templates with variety to avoid abuse detection
+            const commentTemplates = [
+              {
+                template: (vuln) => `### 🚨 CRITICAL SECURITY ALERT: ${vuln.type}
             
-            let totalComments = 0;
-            let successfulComments = 0;
-            let failedComments = 0;
+            **Issue Description:**
+            ${vuln.message}
             
-            // Function to sleep
-            const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+            **Security Impact:** This vulnerability can lead to unauthorized access, data breaches, or system compromise.
             
-            // Group all vulnerabilities by file and create comment objects
-            const allComments = [];
+            **Required Fix:**
+            \`\`\`javascript
+            ${vuln.fix}
+            \`\`\`
+            
+            ⚠️ **URGENT:** This must be addressed before production deployment!`,
+                weight: 3
+              },
+              {
+                template: (vuln) => `## ⛔ High-Risk Vulnerability Found
+            
+            **Vulnerability Type:** ${vuln.type}
+            **Severity Level:** Critical
+            
+            **What's Wrong:**
+            ${vuln.message}
+            
+            **How to Fix It:**
+            \`\`\`javascript
+            ${vuln.fix}
+            \`\`\`
+            
+            This security flaw requires immediate attention to prevent potential exploitation.`,
+                weight: 2
+              },
+              {
+                template: (vuln) => `🔥 **CRITICAL SECURITY ISSUE DETECTED**
+            
+            I've identified a serious security vulnerability in this code:
+            
+            **Problem:** ${vuln.type} vulnerability
+            **Details:** ${vuln.message}
+            
+            **Recommended Solution:**
+            \`\`\`javascript
+            ${vuln.fix}
+            \`\`\`
+            
+            Please prioritize fixing this critical security issue.`,
+                weight: 2
+              },
+              {
+                template: (vuln) => `## Security Review: Critical Finding
+            
+            During my security analysis, I discovered a critical ${vuln.type} vulnerability.
+            
+            **Technical Details:**
+            ${vuln.message}
+            
+            **Mitigation Strategy:**
+            \`\`\`javascript
+            ${vuln.fix}
+            \`\`\`
+            
+            This vulnerability poses significant security risks and should be resolved immediately.`,
+                weight: 1
+              }
+            ];
+            
+            // Function to get random template based on weights
+            function getRandomTemplate() {
+              const totalWeight = commentTemplates.reduce((sum, t) => sum + t.weight, 0);
+              let random = Math.random() * totalWeight;
+              
+              for (const template of commentTemplates) {
+                random -= template.weight;
+                if (random <= 0) {
+                  return template.template;
+                }
+              }
+              return commentTemplates[0].template;
+            }
+            
+            // Only comment on CRITICAL vulnerabilities to reduce volume and avoid abuse detection
+            const criticalComments = [];
             
             for (const [filename, fileVulns] of Object.entries(vulnerabilities)) {
               if (!prFiles.has(filename)) {
@@ -378,21 +450,14 @@ jobs:
                 continue;
               }
               
-              for (const vuln of fileVulns) {
-                const comment = `## 🚨 ${vuln.severity.toUpperCase()} Security Issue: ${vuln.type}
-            
-            **Severity**: ${vuln.severity === 'critical' ? '🔴 Critical' : vuln.severity === 'high' ? '🟠 High' : '🟡 Medium'}
-            
-            **Description**: ${vuln.message}
-            
-            **Recommended Fix**:
-            \`\`\`javascript
-            ${vuln.fix}
-            \`\`\`
-            
-            ${vuln.severity === 'critical' ? '⚠️ **This is a critical security vulnerability that must be fixed before deployment!**' : ''}`;
+              // Filter to only critical vulnerabilities
+              const criticalVulns = fileVulns.filter(v => v.severity === 'critical');
+              
+              for (const vuln of criticalVulns) {
+                const template = getRandomTemplate();
+                const comment = template(vuln);
                 
-                allComments.push({
+                criticalComments.push({
                   path: filename,
                   line: vuln.line,
                   side: 'RIGHT',
@@ -402,106 +467,65 @@ jobs:
               }
             }
             
-            totalComments = allComments.length;
-            console.log(`Total vulnerabilities to comment on: ${totalComments}`);
+            const totalComments = criticalComments.length;
+            console.log(`Posting ${totalComments} critical vulnerability comments (reduced from ${Object.values(vulnerabilities).flat().length} total vulnerabilities)`);
             
             if (totalComments === 0) {
-              console.log('No vulnerabilities found in PR files');
+              console.log('No critical vulnerabilities found in PR files');
               return;
             }
             
-            // Try to create a batch review first with all comments
-            console.log('Attempting to create review with all comments at once...');
-            try {
-              const review = await github.rest.pulls.createReview({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number: prNumber,
-                commit_id: commitSha,
-                event: 'COMMENT',
-                body: `## 🔍 Security Paranoia Bot - Detailed Code Review
+            // Process comments individually with longer delays to avoid abuse detection
+            const DELAY_MS = 3000; // 3 second delay between comments
+            let successfulComments = 0;
+            let failedComments = 0;
             
-            I have analyzed your code and found **${totalComments} security vulnerabilities**. Please review the inline comments below for specific issues and recommended fixes.
+            // Function to sleep
+            const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
             
-            ### Vulnerability Breakdown:
-            - 🔴 Critical: ${allComments.filter(c => c.vuln.severity === 'critical').length}
-            - 🟠 High: ${allComments.filter(c => c.vuln.severity === 'high').length}
-            - 🟡 Medium: ${allComments.filter(c => c.vuln.severity === 'medium').length}`,
-                comments: allComments.map(c => ({
-                  path: c.path,
-                  line: c.line,
-                  side: c.side,
-                  body: c.body
-                }))
-              });
+            console.log('Posting critical vulnerability comments with anti-abuse delays...');
+            
+            for (let i = 0; i < criticalComments.length; i++) {
+              const comment = criticalComments[i];
+              const commentNumber = i + 1;
               
-              console.log(`✅ Successfully created review with all ${totalComments} comments`);
-              successfulComments = totalComments;
-            } catch (batchError) {
-              console.error('Failed to create batch review:', batchError.message);
-              console.log('Falling back to individual comments with rate limiting...');
-              
-              // Process comments in batches
-              for (let i = 0; i < allComments.length; i += BATCH_SIZE) {
-                const batch = allComments.slice(i, i + BATCH_SIZE);
-                const batchNumber = Math.floor(i / BATCH_SIZE) + 1;
-                const totalBatches = Math.ceil(allComments.length / BATCH_SIZE);
-                
-                console.log(`\nProcessing batch ${batchNumber}/${totalBatches} (${batch.length} comments)`);
-                
-                // Process comments in the batch
-                const batchPromises = batch.map(async (comment) => {
-                  try {
-                    await github.rest.pulls.createReviewComment({
-                      owner: context.repo.owner,
-                      repo: context.repo.repo,
-                      pull_number: prNumber,
-                      commit_id: commitSha,
-                      path: comment.path,
-                      line: comment.line,
-                      side: comment.side,
-                      body: comment.body
-                    });
-                    
-                    console.log(`✅ Added comment to ${comment.path}:${comment.line}`);
-                    return { success: true, comment };
-                  } catch (error) {
-                    console.error(`❌ Failed to add comment to ${comment.path}:${comment.line}: ${error.message}`);
-                    return { success: false, comment, error: error.message };
-                  }
+              try {
+                await github.rest.pulls.createReviewComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: prNumber,
+                  commit_id: commitSha,
+                  path: comment.path,
+                  line: comment.line,
+                  side: comment.side,
+                  body: comment.body
                 });
                 
-                // Wait for all comments in the batch to complete
-                const results = await Promise.all(batchPromises);
+                console.log(`✅ [${commentNumber}/${totalComments}] Posted comment on ${comment.path}:${comment.line}`);
+                successfulComments++;
                 
-                // Count successes and failures
-                const batchSuccess = results.filter(r => r.success).length;
-                const batchFailed = results.filter(r => !r.success).length;
-                
-                successfulComments += batchSuccess;
-                failedComments += batchFailed;
-                
-                console.log(`Batch ${batchNumber} complete: ${batchSuccess} successful, ${batchFailed} failed`);
-                
-                // Add delay between batches to avoid rate limiting (except for the last batch)
-                if (i + BATCH_SIZE < allComments.length) {
-                  console.log(`Waiting ${DELAY_MS}ms before next batch...`);
-                  await sleep(DELAY_MS);
-                }
+              } catch (error) {
+                console.error(`❌ [${commentNumber}/${totalComments}] Failed to comment on ${comment.path}:${comment.line}: ${error.message}`);
+                failedComments++;
+              }
+              
+              // Add delay between comments (except for the last one)
+              if (i < criticalComments.length - 1) {
+                console.log(`⏳ Waiting ${DELAY_MS}ms before next comment...`);
+                await sleep(DELAY_MS);
               }
             }
             
             // Final summary
-            console.log('\n📊 Final Summary:');
-            console.log(`Total vulnerabilities: ${totalComments}`);
-            console.log(`✅ Successfully commented: ${successfulComments}`);
-            console.log(`❌ Failed to comment: ${failedComments}`);
+            console.log('\n📊 Critical Vulnerability Comments Summary:');
+            console.log(`✅ Successfully posted: ${successfulComments}`);
+            console.log(`❌ Failed to post: ${failedComments}`);
+            console.log(`📝 Note: Only critical vulnerabilities are commented to focus on highest priority issues`);
             
-            if (failedComments > 0) {
-              console.log('\nNote: Some comments failed to post. This might be due to:');
-              console.log('- Lines not being part of the PR diff');
-              console.log('- Rate limiting');
-              console.log('- File permissions');
+            if (successfulComments > 0) {
+              console.log('\n🎯 Successfully posted inline comments on critical security vulnerabilities!');
+            } else if (failedComments > 0) {
+              console.log('\n⚠️ Some critical vulnerability comments failed to post. This might be due to abuse detection or API limits.');
             }
       
       - name: Set Final Exit Code
