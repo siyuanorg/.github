@@ -41,10 +41,9 @@ jobs:
       - name: Run Security Analysis
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          # Optional configuration
+          # AI Analysis is disabled - using pattern-based detection only
+          ENABLE_AI_ANALYSIS: 'false'
           MAX_COMMENTS_PER_PR: 25
-          ENABLE_AI_ANALYSIS: ${{ vars.ENABLE_AI_ANALYSIS || 'true' }}
         run: |
           security-paranoia-bot action \
             --repo ${{ github.repository }} \
