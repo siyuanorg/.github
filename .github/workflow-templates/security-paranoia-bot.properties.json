@@ -1,0 +1,23 @@
+{
+  "name": "Security Paranoia Bot",
+  "description": "Automatically scan pull requests for security vulnerabilities using AI-powered pattern matching and code analysis",
+  "iconName": "security-paranoia-bot",
+  "categories": [
+    "security",
+    "code-quality",
+    "automation"
+  ],
+  "filePatterns": [
+    "package.json",
+    "*.js",
+    "*.ts",
+    "*.jsx",
+    "*.tsx",
+    "*.py",
+    "*.java",
+    "*.cs",
+    "*.go",
+    "*.rb",
+    "*.php"
+  ]
+}
