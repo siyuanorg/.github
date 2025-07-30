@@ -42,6 +42,7 @@ jobs:
       
       - name: Security Analysis
         id: security-scan
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -201,19 +202,20 @@ jobs:
           
           echo "💾 Security report saved"
           
-          # Set output for status check
+          # Store the build status for later steps
           if [[ $CRITICAL_COUNT -gt 0 ]]; then
             echo "❌ BUILD FAILED: $CRITICAL_COUNT critical vulnerabilities detected"
             echo "build_status=failure" >> $GITHUB_OUTPUT
-            exit 1
+            echo "FINAL_EXIT_CODE=1" >> $GITHUB_ENV
           else
             echo "✅ BUILD PASSED: No critical vulnerabilities"
             echo "build_status=success" >> $GITHUB_OUTPUT
+            echo "FINAL_EXIT_CODE=0" >> $GITHUB_ENV
           fi
       
       - name: Upload Security Report
-        uses: actions/upload-artifact@v4
         if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: security-analysis-report
           path: |
@@ -501,3 +503,15 @@ jobs:
               console.log('- Rate limiting');
               console.log('- File permissions');
             }
+      
+      - name: Set Final Exit Code
+        if: always()
+        run: |
+          # Use the exit code determined in the Security Analysis step
+          if [[ "${FINAL_EXIT_CODE:-0}" == "1" ]]; then
+            echo "❌ Workflow failing due to critical vulnerabilities"
+            exit 1
+          else
+            echo "✅ Workflow passing - no critical vulnerabilities"
+            exit 0
+          fi
