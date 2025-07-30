@@ -346,15 +346,8 @@ jobs:
             
             const commitSha = pr.data.head.sha;
             
-            // Create a review
-            const review = await github.rest.pulls.createReview({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: prNumber,
-              commit_id: commitSha,
-              event: 'COMMENT',
-              comments: []
-            });
+            // Build all comments first
+            const reviewComments = [];
             
             // Process each file's vulnerabilities
             for (const [filename, fileVulns] of Object.entries(vulnerabilities)) {
@@ -372,24 +365,59 @@ jobs:
             
             ${vuln.severity === 'critical' ? '⚠️ **This is a critical security vulnerability that must be fixed before deployment!**' : ''}`;
                 
+                reviewComments.push({
+                  path: filename,
+                  line: vuln.line,
+                  side: 'RIGHT',
+                  body: comment
+                });
+                
+                console.log(`Prepared comment for ${filename}:${vuln.line}`);
+              }
+            }
+            
+            if (reviewComments.length === 0) {
+              console.log('No vulnerabilities found to comment on');
+              return;
+            }
+            
+            // Create a review with all comments at once
+            try {
+              const review = await github.rest.pulls.createReview({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+                commit_id: commitSha,
+                event: 'COMMENT',
+                body: '## 🔍 Security Paranoia Bot - Detailed Code Review\n\nI have analyzed your code and found security vulnerabilities. Please review the inline comments below for specific issues and recommended fixes.',
+                comments: reviewComments
+              });
+              
+              console.log(`Successfully created review with ${reviewComments.length} comments`);
+            } catch (error) {
+              console.error('Failed to create review:', error.message);
+              
+              // If batch review fails, try adding comments individually
+              console.log('Attempting to add comments individually...');
+              
+              for (const comment of reviewComments) {
                 try {
-                  // Add review comment
                   await github.rest.pulls.createReviewComment({
                     owner: context.repo.owner,
                     repo: context.repo.repo,
                     pull_number: prNumber,
                     commit_id: commitSha,
-                    path: filename,
-                    line: vuln.line,
-                    side: 'RIGHT',
-                    body: comment
+                    path: comment.path,
+                    line: comment.line,
+                    side: comment.side,
+                    body: comment.body
                   });
                   
-                  console.log(`Added comment to ${filename}:${vuln.line}`);
-                } catch (error) {
-                  console.error(`Failed to add comment to ${filename}:${vuln.line}:`, error.message);
+                  console.log(`Added comment to ${comment.path}:${comment.line}`);
+                } catch (individualError) {
+                  console.error(`Failed to add comment to ${comment.path}:${comment.line}:`, individualError.message);
                 }
               }
             }
             
-            console.log('Finished adding inline review comments');
+            console.log('Finished processing inline review comments');
