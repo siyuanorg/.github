@@ -346,11 +346,36 @@ jobs:
             
             const commitSha = pr.data.head.sha;
             
-            // Build all comments first
-            const reviewComments = [];
+            // Get PR files to check which files are part of the diff
+            const files = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+              per_page: 100
+            });
             
-            // Process each file's vulnerabilities
+            const prFiles = new Set(files.data.map(f => f.filename));
+            
+            // Process vulnerabilities in batches to avoid rate limits
+            const BATCH_SIZE = 10;
+            const DELAY_MS = 1000; // 1 second delay between batches
+            
+            let totalComments = 0;
+            let successfulComments = 0;
+            let failedComments = 0;
+            
+            // Function to sleep
+            const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+            
+            // Group all vulnerabilities by file and create comment objects
+            const allComments = [];
+            
             for (const [filename, fileVulns] of Object.entries(vulnerabilities)) {
+              if (!prFiles.has(filename)) {
+                console.log(`Skipping ${filename} - not part of PR`);
+                continue;
+              }
+              
               for (const vuln of fileVulns) {
                 const comment = `## 🚨 ${vuln.severity.toUpperCase()} Security Issue: ${vuln.type}
             
@@ -365,23 +390,26 @@ jobs:
             
             ${vuln.severity === 'critical' ? '⚠️ **This is a critical security vulnerability that must be fixed before deployment!**' : ''}`;
                 
-                reviewComments.push({
+                allComments.push({
                   path: filename,
                   line: vuln.line,
                   side: 'RIGHT',
-                  body: comment
+                  body: comment,
+                  vuln: vuln
                 });
-                
-                console.log(`Prepared comment for ${filename}:${vuln.line}`);
               }
             }
             
-            if (reviewComments.length === 0) {
-              console.log('No vulnerabilities found to comment on');
+            totalComments = allComments.length;
+            console.log(`Total vulnerabilities to comment on: ${totalComments}`);
+            
+            if (totalComments === 0) {
+              console.log('No vulnerabilities found in PR files');
               return;
             }
             
-            // Create a review with all comments at once
+            // Try to create a batch review first with all comments
+            console.log('Attempting to create review with all comments at once...');
             try {
               const review = await github.rest.pulls.createReview({
                 owner: context.repo.owner,
@@ -389,35 +417,87 @@ jobs:
                 pull_number: prNumber,
                 commit_id: commitSha,
                 event: 'COMMENT',
-                body: '## 🔍 Security Paranoia Bot - Detailed Code Review\n\nI have analyzed your code and found security vulnerabilities. Please review the inline comments below for specific issues and recommended fixes.',
-                comments: reviewComments
+                body: `## 🔍 Security Paranoia Bot - Detailed Code Review
+            
+            I have analyzed your code and found **${totalComments} security vulnerabilities**. Please review the inline comments below for specific issues and recommended fixes.
+            
+            ### Vulnerability Breakdown:
+            - 🔴 Critical: ${allComments.filter(c => c.vuln.severity === 'critical').length}
+            - 🟠 High: ${allComments.filter(c => c.vuln.severity === 'high').length}
+            - 🟡 Medium: ${allComments.filter(c => c.vuln.severity === 'medium').length}`,
+                comments: allComments.map(c => ({
+                  path: c.path,
+                  line: c.line,
+                  side: c.side,
+                  body: c.body
+                }))
               });
               
-              console.log(`Successfully created review with ${reviewComments.length} comments`);
-            } catch (error) {
-              console.error('Failed to create review:', error.message);
+              console.log(`✅ Successfully created review with all ${totalComments} comments`);
+              successfulComments = totalComments;
+            } catch (batchError) {
+              console.error('Failed to create batch review:', batchError.message);
+              console.log('Falling back to individual comments with rate limiting...');
               
-              // If batch review fails, try adding comments individually
-              console.log('Attempting to add comments individually...');
-              
-              for (const comment of reviewComments) {
-                try {
-                  await github.rest.pulls.createReviewComment({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    pull_number: prNumber,
-                    commit_id: commitSha,
-                    path: comment.path,
-                    line: comment.line,
-                    side: comment.side,
-                    body: comment.body
-                  });
-                  
-                  console.log(`Added comment to ${comment.path}:${comment.line}`);
-                } catch (individualError) {
-                  console.error(`Failed to add comment to ${comment.path}:${comment.line}:`, individualError.message);
+              // Process comments in batches
+              for (let i = 0; i < allComments.length; i += BATCH_SIZE) {
+                const batch = allComments.slice(i, i + BATCH_SIZE);
+                const batchNumber = Math.floor(i / BATCH_SIZE) + 1;
+                const totalBatches = Math.ceil(allComments.length / BATCH_SIZE);
+                
+                console.log(`\nProcessing batch ${batchNumber}/${totalBatches} (${batch.length} comments)`);
+                
+                // Process comments in the batch
+                const batchPromises = batch.map(async (comment) => {
+                  try {
+                    await github.rest.pulls.createReviewComment({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      pull_number: prNumber,
+                      commit_id: commitSha,
+                      path: comment.path,
+                      line: comment.line,
+                      side: comment.side,
+                      body: comment.body
+                    });
+                    
+                    console.log(`✅ Added comment to ${comment.path}:${comment.line}`);
+                    return { success: true, comment };
+                  } catch (error) {
+                    console.error(`❌ Failed to add comment to ${comment.path}:${comment.line}: ${error.message}`);
+                    return { success: false, comment, error: error.message };
+                  }
+                });
+                
+                // Wait for all comments in the batch to complete
+                const results = await Promise.all(batchPromises);
+                
+                // Count successes and failures
+                const batchSuccess = results.filter(r => r.success).length;
+                const batchFailed = results.filter(r => !r.success).length;
+                
+                successfulComments += batchSuccess;
+                failedComments += batchFailed;
+                
+                console.log(`Batch ${batchNumber} complete: ${batchSuccess} successful, ${batchFailed} failed`);
+                
+                // Add delay between batches to avoid rate limiting (except for the last batch)
+                if (i + BATCH_SIZE < allComments.length) {
+                  console.log(`Waiting ${DELAY_MS}ms before next batch...`);
+                  await sleep(DELAY_MS);
                 }
               }
             }
             
-            console.log('Finished processing inline review comments');
+            // Final summary
+            console.log('\n📊 Final Summary:');
+            console.log(`Total vulnerabilities: ${totalComments}`);
+            console.log(`✅ Successfully commented: ${successfulComments}`);
+            console.log(`❌ Failed to comment: ${failedComments}`);
+            
+            if (failedComments > 0) {
+              console.log('\nNote: Some comments failed to post. This might be due to:');
+              console.log('- Lines not being part of the PR diff');
+              console.log('- Rate limiting');
+              console.log('- File permissions');
+            }
