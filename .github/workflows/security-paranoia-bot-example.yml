@@ -1,0 +1,17 @@
+name: Security Analysis Example
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  security-check:
+    uses: siyuanorg/.github/.github/workflows/security-paranoia-bot.yml@main
+    with:
+      enable_deep_scan: true
+      enable_ai_analysis: true
+      enable_ml_features: false  # Set to true if you have Phase 3 deployed
+    secrets:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}  # Optional - for AI analysis
+      # PHASE3_API_URL: ${{ secrets.PHASE3_API_URL }}  # For ML features
+      # PHASE3_API_KEY: ${{ secrets.PHASE3_API_KEY }}  # For ML features
