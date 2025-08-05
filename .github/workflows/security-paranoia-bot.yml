@@ -1,4 +1,4 @@
-name: Security Paranoia Bot - Local Analysis
+name: Security Paranoia Bot - Inline Analysis
 
 on:
   workflow_call:
@@ -47,180 +47,394 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          path: 'target-repo'
-      
-      - name: Checkout Security Paranoia Bot
-        uses: actions/checkout@v4
-        with:
-          repository: 'storehubai/security-paranoia-bot'
-          path: 'security-bot'
-          ref: 'main'
       
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '18'
-          cache: 'npm'
-          cache-dependency-path: 'security-bot/package-lock.json'
       
-      - name: Install Security Bot Dependencies
-        working-directory: security-bot
+      - name: Install analysis dependencies
         run: |
-          echo "📦 Installing dependencies..."
-          npm ci
+          echo "📦 Installing security analysis dependencies..."
+          npm init -y
+          npm install --save-dev \
+            @octokit/rest \
+            js-yaml \
+            eslint \
+            eslint-plugin-security \
+            @typescript-eslint/parser \
+            @typescript-eslint/eslint-plugin
       
-      - name: Build Security Bot
-        working-directory: security-bot
+      - name: Create Security Analysis Script
         run: |
-          echo "🔨 Building Security Paranoia Bot..."
-          npm run build || echo "No build script found, continuing..."
-      
-      - name: Run Local Security Analysis
-        id: security_scan
-        continue-on-error: true
-        working-directory: security-bot
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          ENABLE_AI_ANALYSIS: ${{ inputs.enable_ai_analysis }}
-          ENABLE_DEEP_SCAN: ${{ inputs.enable_deep_scan }}
-          ENABLE_ML_FEATURES: ${{ inputs.enable_ml_features }}
-          PHASE3_API_URL: ${{ secrets.PHASE3_API_URL }}
-          PHASE3_API_KEY: ${{ secrets.PHASE3_API_KEY }}
-          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
-          TARGET_REPO_PATH: ${{ github.workspace }}/target-repo
-          REPO_OWNER: ${{ github.repository_owner }}
-          REPO_NAME: ${{ github.event.repository.name }}
-        run: |
-          echo "🔍 Starting Local Security Analysis..."
-          echo "Repository: ${{ github.repository }}"
-          echo "PR Number: ${PR_NUMBER}"
-          echo "Target Path: ${TARGET_REPO_PATH}"
-          
-          # Create output directory
-          mkdir -p analysis-output
-          
-          # Run the analysis directly
-          if [[ -f "src/cli.ts" ]]; then
-            echo "Running TypeScript CLI..."
-            npx ts-node src/cli.ts analyze-pr \
-              --owner "${REPO_OWNER}" \
-              --repo "${REPO_NAME}" \
-              --pr-number "${PR_NUMBER}" \
-              --local-path "${TARGET_REPO_PATH}" \
-              --output "analysis-output/results.json" \
-              ${ENABLE_AI_ANALYSIS:+--enable-ai} \
-              ${ENABLE_DEEP_SCAN:+--enable-deep-scan} \
-              ${ENABLE_ML_FEATURES:+--enable-ml}
-          else
-            echo "TypeScript CLI not found, trying JavaScript..."
-            
-            # Alternative: Run the bot directly with node
-            cat > run-analysis.js << 'EOF'
-          const { PullRequestAnalyzer } = require('./src/integrations/github/PullRequestAnalyzer');
-          const { AttackEngine } = require('./src/attack-engine/AttackEngine');
-          const { MongoDBFuzzer } = require('./src/mongodb-fuzzer/MongoDBFuzzer');
+          cat > security-analysis.js << 'EOF'
           const { Octokit } = require('@octokit/rest');
           const fs = require('fs');
           const path = require('path');
           
-          async function runLocalAnalysis() {
-            const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
-            const attackEngine = new AttackEngine();
-            const mongoFuzzer = new MongoDBFuzzer();
-            const analyzer = new PullRequestAnalyzer(octokit, attackEngine, mongoFuzzer);
+          // Security vulnerability patterns
+          const VULNERABILITY_PATTERNS = [
+            // SQL Injection patterns
+            {
+              pattern: /(\$\{[^}]+\}|"\s*\+\s*[^"]+\s*\+\s*"|\'\s*\+\s*[^']+\s*\+\s*').*(SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|EXEC|UNION|WHERE)/gi,
+              type: 'SQL Injection',
+              severity: 'critical',
+              message: 'Direct string concatenation in SQL query. User input is directly inserted into the query without parameterization.',
+              fix: 'Use parameterized queries or prepared statements'
+            },
+            {
+              pattern: /query\s*\(\s*['"`].*\$\{.*\}.*['"`]\s*\)/gi,
+              type: 'SQL Injection',
+              severity: 'critical',
+              message: 'Template literal in SQL query creates injection vulnerability',
+              fix: 'Use parameterized queries: db.query("SELECT * FROM users WHERE id = ?", [userId])'
+            },
             
-            // Get PR files
-            const prNumber = parseInt(process.env.PR_NUMBER);
-            const owner = process.env.REPO_OWNER;
-            const repo = process.env.REPO_NAME;
+            // XSS patterns
+            {
+              pattern: /innerHTML\s*=\s*[^'"`]+(\$\{|[+])/gi,
+              type: 'XSS',
+              severity: 'high',
+              message: 'Direct HTML injection via innerHTML with user input',
+              fix: 'Use textContent or properly escape HTML content'
+            },
+            {
+              pattern: /document\.write\s*\([^)]*(\$\{|[+])/gi,
+              type: 'XSS',
+              severity: 'high',
+              message: 'document.write with user input can lead to XSS',
+              fix: 'Use DOM methods instead of document.write'
+            },
+            
+            // Command Injection
+            {
+              pattern: /exec\s*\(\s*[^)]*(\$\{|[+])/gi,
+              type: 'Command Injection',
+              severity: 'critical',
+              message: 'Direct command execution with user input enables remote code execution',
+              fix: 'Use child_process.spawn() with argument array instead of exec()'
+            },
+            {
+              pattern: /eval\s*\(/gi,
+              type: 'Code Injection',
+              severity: 'critical',
+              message: 'eval() allows arbitrary code execution',
+              fix: 'Never use eval(). Use JSON.parse() for JSON or safer alternatives'
+            },
+            
+            // Authentication & Crypto
+            {
+              pattern: /createHash\s*\(\s*['"]md5['"]\s*\)/gi,
+              type: 'Weak Cryptography',
+              severity: 'critical',
+              message: 'MD5 is cryptographically broken and should never be used for passwords',
+              fix: 'Use bcrypt with cost factor 10+ or argon2'
+            },
+            {
+              pattern: /jwt\.sign\s*\([^)]+\)\s*(?![^)]*expiresIn)/gi,
+              type: 'JWT Misconfiguration',
+              severity: 'high',
+              message: 'JWT without expiration can be used indefinitely if compromised',
+              fix: 'Add expiresIn option: jwt.sign(payload, secret, { expiresIn: "1h" })'
+            },
+            
+            // Hardcoded Secrets
+            {
+              pattern: /(api[_-]?key|apikey|secret[_-]?key|password|pwd|passwd|token)\s*[:=]\s*["'][^"']+["']/gi,
+              type: 'Hardcoded Secret',
+              severity: 'critical',
+              message: 'Hardcoded credentials or API keys in source code',
+              fix: 'Use environment variables: process.env.API_KEY'
+            },
+            {
+              pattern: /["'](sk_|pk_|api_|key_|secret_|token_)[a-zA-Z0-9]+["']/g,
+              type: 'Exposed Secret',
+              severity: 'critical',
+              message: 'API key or secret token exposed in source code',
+              fix: 'Move to environment variables and use secret management'
+            },
+            
+            // NoSQL Injection
+            {
+              pattern: /\$where\s*:/gi,
+              type: 'NoSQL Injection',
+              severity: 'critical',
+              message: '$where allows JavaScript code execution in MongoDB',
+              fix: 'Avoid $where, use standard query operators instead'
+            },
+            {
+              pattern: /find(One)?\s*\(\s*\{[^}]*:\s*[^'"`{][^,}]+\}/gi,
+              type: 'NoSQL Injection',
+              severity: 'high',
+              message: 'Direct object passing to MongoDB query may allow operator injection',
+              fix: 'Validate inputs are strings, not objects: typeof username === "string"'
+            },
+            
+            // Path Traversal
+            {
+              pattern: /path\.join\s*\([^)]*\.\.[^)]*\)/gi,
+              type: 'Path Traversal',
+              severity: 'high',
+              message: 'Path traversal vulnerability - user can access parent directories',
+              fix: 'Validate and sanitize file paths, use path.basename()'
+            },
+            
+            // CORS Misconfiguration
+            {
+              pattern: /cors\s*\(\s*\{[^}]*origin\s*:\s*['"`]\*['"`][^}]*credentials\s*:\s*true/gi,
+              type: 'CORS Misconfiguration',
+              severity: 'high',
+              message: 'Wildcard CORS with credentials enabled is dangerous',
+              fix: 'Specify allowed origins explicitly, never use * with credentials'
+            },
+            
+            // Missing Authentication
+            {
+              pattern: /(admin|delete|update|modify|write).*\(.*req.*res.*\).*\{(?![^}]*auth|[^}]*session|[^}]*user\.id)/gi,
+              type: 'Missing Authentication',
+              severity: 'critical',
+              message: 'Sensitive operation without authentication check',
+              fix: 'Add authentication middleware to verify user before operation'
+            },
+            
+            // Weak Randomness
+            {
+              pattern: /Math\.random\(\).*(?=token|session|id|key|password)/gi,
+              type: 'Weak Randomness',
+              severity: 'high',
+              message: 'Math.random() is not cryptographically secure',
+              fix: 'Use crypto.randomBytes() for secure random generation'
+            },
+            
+            // Session Management
+            {
+              pattern: /localStorage\.(setItem|getItem)\s*\(\s*['"`](token|session|auth)/gi,
+              type: 'Insecure Storage',
+              severity: 'high',
+              message: 'Storing sensitive data in localStorage is vulnerable to XSS',
+              fix: 'Use httpOnly cookies for sensitive data'
+            },
+            
+            // Rate Limiting
+            {
+              pattern: /(login|authenticate|reset).*\(.*req.*res.*\).*\{(?![^}]*rateLimit|[^}]*limiter)/gi,
+              type: 'Missing Rate Limiting',
+              severity: 'medium',
+              message: 'Authentication endpoint without rate limiting can be brute-forced',
+              fix: 'Add rate limiting middleware: express-rate-limit'
+            },
+            
+            // Error Disclosure
+            {
+              pattern: /catch\s*\([^)]+\).*\{[^}]*res\.(json|send)\s*\([^)]*error\.stack/gi,
+              type: 'Information Disclosure',
+              severity: 'medium',
+              message: 'Stack traces expose internal application details',
+              fix: 'Log errors server-side, return generic error messages to users'
+            },
+            
+            // Business Logic - Negative Values
+            {
+              pattern: /(quantity|amount|price|total).*=.*req\.(body|query|params)(?![^;]*>[^;]*0)/gi,
+              type: 'Input Validation',
+              severity: 'high',
+              message: 'Numeric input not validated - could be negative or invalid',
+              fix: 'Validate numeric inputs are positive: if (amount <= 0) throw new Error("Invalid amount")'
+            },
+            
+            // Prototype Pollution
+            {
+              pattern: /for\s*\(\s*.*in\s+.*\)\s*\{[^}]*target\[.*\]\s*=/gi,
+              type: 'Prototype Pollution',
+              severity: 'high',
+              message: 'Object iteration without hasOwnProperty check may lead to prototype pollution',
+              fix: 'Use Object.hasOwn() or hasOwnProperty check in loops'
+            },
+            
+            // File Upload
+            {
+              pattern: /upload.*\(.*\).*\{(?![^}]*fileFilter|[^}]*mimetype|[^}]*extension)/gi,
+              type: 'File Upload Vulnerability',
+              severity: 'high',
+              message: 'File upload without validation can lead to malicious file uploads',
+              fix: 'Validate file type, size, and sanitize filename'
+            },
+            
+            // Payment Security
+            {
+              pattern: /(amount|price|total)\s*=\s*req\.(body|query|params)/gi,
+              type: 'Payment Manipulation',
+              severity: 'critical',
+              message: 'Client-controlled payment amount without server-side validation',
+              fix: 'Always calculate prices server-side based on product database'
+            },
+            
+            // Timing Attacks
+            {
+              pattern: /password\s*===\s*|token\s*===\s*/gi,
+              type: 'Timing Attack',
+              severity: 'medium',
+              message: 'String comparison vulnerable to timing attacks',
+              fix: 'Use crypto.timingSafeEqual() for constant-time comparison'
+            },
+            
+            // Race Conditions
+            {
+              pattern: /findOne.*\{[^}]+\}.*\.then.*create|check.*\.then.*save/gi,
+              type: 'Race Condition',
+              severity: 'high',
+              message: 'Check-then-act pattern may lead to race conditions',
+              fix: 'Use database transactions or atomic operations'
+            },
+            
+            // Missing CSRF Protection
+            {
+              pattern: /(post|put|delete|patch)\s*\(\s*['"`]\/.*\(.*req.*res.*\).*\{(?![^}]*csrf)/gi,
+              type: 'CSRF',
+              severity: 'high',
+              message: 'State-changing request without CSRF protection',
+              fix: 'Implement CSRF tokens for all state-changing operations'
+            }
+          ];
+          
+          async function analyzeFile(filePath, content) {
+            const vulnerabilities = [];
+            const lines = content.split('\n');
+            
+            // Check each pattern
+            for (const patternDef of VULNERABILITY_PATTERNS) {
+              const matches = [...content.matchAll(patternDef.pattern)];
+              
+              for (const match of matches) {
+                // Find line number
+                let lineNumber = 1;
+                let position = 0;
+                for (let i = 0; i < lines.length; i++) {
+                  position += lines[i].length + 1; // +1 for newline
+                  if (position > match.index) {
+                    lineNumber = i + 1;
+                    break;
+                  }
+                }
+                
+                vulnerabilities.push({
+                  line: lineNumber,
+                  type: patternDef.type,
+                  severity: patternDef.severity,
+                  message: patternDef.message,
+                  fix: patternDef.fix,
+                  code: match[0].substring(0, 100) // First 100 chars of match
+                });
+              }
+            }
+            
+            return vulnerabilities;
+          }
+          
+          async function runAnalysis() {
+            const prNumber = process.env.PR_NUMBER;
+            const owner = process.env.GITHUB_REPOSITORY_OWNER;
+            const repo = process.env.GITHUB_REPOSITORY.split('/')[1];
             
             console.log(`Analyzing PR #${prNumber} in ${owner}/${repo}`);
             
-            try {
-              // Get PR files from GitHub
-              const { data: files } = await octokit.pulls.listFiles({
-                owner,
-                repo,
-                pull_number: prNumber,
-                per_page: 100
-              });
+            const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+            
+            // Get PR files
+            const { data: files } = await octokit.pulls.listFiles({
+              owner,
+              repo,
+              pull_number: prNumber,
+              per_page: 100
+            });
+            
+            console.log(`Found ${files.length} files in PR`);
+            
+            const vulnerabilitiesByFile = {};
+            let totalVulnerabilities = 0;
+            let criticalCount = 0;
+            let highCount = 0;
+            let mediumCount = 0;
+            let lowCount = 0;
+            
+            // Analyze each file
+            for (const file of files) {
+              if (file.status === 'removed') continue;
               
-              console.log(`Found ${files.length} files in PR`);
+              // Only analyze JS/TS files
+              if (!file.filename.match(/\.(js|jsx|ts|tsx)$/)) continue;
               
-              // Analyze each file
-              const vulnerabilitiesByFile = {};
-              let totalVulnerabilities = 0;
-              let criticalCount = 0;
-              let highCount = 0;
-              let mediumCount = 0;
-              let lowCount = 0;
+              console.log(`Analyzing ${file.filename}...`);
               
-              for (const file of files) {
-                if (file.status === 'removed') continue;
-                
-                const filePath = path.join(process.env.TARGET_REPO_PATH, file.filename);
-                
-                if (fs.existsSync(filePath)) {
-                  const content = fs.readFileSync(filePath, 'utf8');
-                  console.log(`Analyzing ${file.filename}...`);
-                  
-                  const results = await attackEngine.analyzeCode(content, file.filename);
-                  
-                  if (results && results.length > 0) {
-                    vulnerabilitiesByFile[file.filename] = results.map(r => ({
-                      line: r.location?.line || 1,
-                      type: r.type || r.vulnerability,
-                      severity: r.severity || 'medium',
-                      message: r.description || r.message,
-                      fix: r.recommendation || r.fix || 'Review and fix this vulnerability'
-                    }));
-                    
-                    totalVulnerabilities += results.length;
-                    results.forEach(r => {
-                      const severity = r.severity || 'medium';
-                      if (severity === 'critical') criticalCount++;
-                      else if (severity === 'high') highCount++;
-                      else if (severity === 'medium') mediumCount++;
-                      else lowCount++;
-                    });
-                  }
-                }
+              // Read file content
+              let content;
+              try {
+                content = fs.readFileSync(file.filename, 'utf8');
+              } catch (error) {
+                console.log(`Could not read ${file.filename}, skipping...`);
+                continue;
               }
               
-              // Save results
-              const results = {
-                vulnerabilitiesByFile,
-                totalVulnerabilities,
-                criticalCount,
-                highCount,
-                mediumCount,
-                lowCount,
-                analysisTime: Date.now()
-              };
+              const vulns = await analyzeFile(file.filename, content);
               
-              fs.writeFileSync('analysis-output/results.json', JSON.stringify(results, null, 2));
-              console.log(`Analysis complete: ${totalVulnerabilities} vulnerabilities found`);
-              
-            } catch (error) {
-              console.error('Analysis failed:', error);
-              process.exit(1);
+              if (vulns.length > 0) {
+                vulnerabilitiesByFile[file.filename] = vulns;
+                totalVulnerabilities += vulns.length;
+                
+                vulns.forEach(v => {
+                  if (v.severity === 'critical') criticalCount++;
+                  else if (v.severity === 'high') highCount++;
+                  else if (v.severity === 'medium') mediumCount++;
+                  else lowCount++;
+                });
+                
+                console.log(`  Found ${vulns.length} vulnerabilities`);
+              }
             }
+            
+            // Save results
+            const results = {
+              vulnerabilitiesByFile,
+              totalVulnerabilities,
+              criticalCount,
+              highCount,
+              mediumCount,
+              lowCount,
+              analysisTime: new Date().toISOString()
+            };
+            
+            fs.writeFileSync('vulnerability-details.json', JSON.stringify(results, null, 2));
+            fs.writeFileSync('vulnerabilities-by-file.json', JSON.stringify(vulnerabilitiesByFile, null, 2));
+            
+            console.log(`\nAnalysis complete:`);
+            console.log(`Total vulnerabilities: ${totalVulnerabilities}`);
+            console.log(`Critical: ${criticalCount}`);
+            console.log(`High: ${highCount}`);
+            console.log(`Medium: ${mediumCount}`);
+            console.log(`Low: ${lowCount}`);
           }
           
-          runLocalAnalysis();
+          runAnalysis().catch(console.error);
           EOF
-            
-            node run-analysis.js
-          fi
+      
+      - name: Run Security Analysis
+        id: security_scan
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: |
+          echo "🔍 Starting Security Analysis..."
           
-          # Check if analysis was successful
-          if [[ -f "analysis-output/results.json" ]]; then
+          node security-analysis.js
+          
+          if [[ -f "vulnerability-details.json" ]]; then
             echo "✅ Analysis completed successfully"
             
             # Parse results
-            RESULTS=$(cat analysis-output/results.json)
+            RESULTS=$(cat vulnerability-details.json)
             
             # Extract counts
             TOTAL_VULNERABILITIES=$(echo "$RESULTS" | jq '.totalVulnerabilities // 0')
@@ -229,21 +443,8 @@ jobs:
             MEDIUM_COUNT=$(echo "$RESULTS" | jq '.mediumCount // 0')
             LOW_COUNT=$(echo "$RESULTS" | jq '.lowCount // 0')
             
-            echo ""
-            echo "📊 VULNERABILITY SUMMARY"
-            echo "======================="
-            echo "Total: $TOTAL_VULNERABILITIES"
-            echo "🔴 Critical: $CRITICAL_COUNT"
-            echo "🟠 High: $HIGH_COUNT"
-            echo "🟡 Medium: $MEDIUM_COUNT"
-            echo "🟢 Low: $LOW_COUNT"
-            
-            # Copy results to workspace
-            cp analysis-output/results.json ${{ github.workspace }}/vulnerability-details.json
-            echo "$RESULTS" | jq '.vulnerabilitiesByFile' > ${{ github.workspace }}/vulnerabilities-by-file.json
-            
             # Generate report
-            cat > ${{ github.workspace }}/security-report.json << EOF
+            cat > security-report.json << EOF
           {
             "summary": {
               "totalVulnerabilities": ${TOTAL_VULNERABILITIES},
@@ -252,9 +453,9 @@ jobs:
               "medium": ${MEDIUM_COUNT},
               "low": ${LOW_COUNT},
               "analysisTime": "$(date -Iseconds)",
-              "aiAnalysisEnabled": ${ENABLE_AI_ANALYSIS},
-              "mlFeaturesEnabled": ${ENABLE_ML_FEATURES},
-              "deepScanEnabled": ${ENABLE_DEEP_SCAN}
+              "aiAnalysisEnabled": ${{ inputs.enable_ai_analysis }},
+              "mlFeaturesEnabled": ${{ inputs.enable_ml_features }},
+              "deepScanEnabled": ${{ inputs.enable_deep_scan }}
             }
           }
           EOF
@@ -271,8 +472,9 @@ jobs:
             fi
           else
             echo "❌ Analysis failed - no results file found"
-            echo '{"vulnerabilitiesByFile": {}}' > ${{ github.workspace }}/vulnerability-details.json
-            echo '{"summary": {"totalVulnerabilities": 0}}' > ${{ github.workspace }}/security-report.json
+            echo '{"vulnerabilitiesByFile": {}}' > vulnerability-details.json
+            echo '{"vulnerabilitiesByFile": {}}' > vulnerabilities-by-file.json
+            echo '{"summary": {"totalVulnerabilities": 0}}' > security-report.json
             echo "build_status=success" >> $GITHUB_OUTPUT
             echo "FINAL_EXIT_CODE=0" >> $GITHUB_ENV
           fi
@@ -306,7 +508,7 @@ jobs:
             -d "{
               \"vulnerabilities\": ${VULNS_JSON},
               \"repository\": \"${{ github.repository }}\",
-              \"prNumber\": ${PR_NUMBER:-0}
+              \"prNumber\": ${{ inputs.pr_number || github.event.pull_request.number || 0 }}
             }" || echo '{"error": "ML API call failed"}')
           
           echo "$ML_RESPONSE" > ml-analysis-results.json
@@ -443,7 +645,7 @@ jobs:
             
             ---
             
-            > 🤖 **Security Paranoia Bot** - Local vulnerability analysis powered by SiYuan Organization
+            > 🤖 **Security Paranoia Bot** - Pattern-based vulnerability analysis powered by SiYuan Organization
             > 
             > 📊 **Scanned**: ${Object.keys(vulnerabilities || {}).length} files | **Found**: ${summary.totalVulnerabilities} vulnerabilities
             > 
