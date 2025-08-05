@@ -17,10 +17,19 @@ on:
         required: false
         type: boolean
         default: true
+      enable_ml_features:
+        description: 'Enable Phase 3 ML features'
+        required: false
+        type: boolean
+        default: true
     secrets:
       GEMINI_API_KEY:
         required: false
       OPENAI_API_KEY:
+        required: false
+      PHASE3_API_URL:
+        required: false
+      PHASE3_API_KEY:
         required: false
 
 jobs:
@@ -49,6 +58,9 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ENABLE_AI_ANALYSIS: ${{ inputs.enable_ai_analysis }}
           ENABLE_DEEP_SCAN: ${{ inputs.enable_deep_scan }}
+          ENABLE_ML_FEATURES: ${{ inputs.enable_ml_features }}
+          PHASE3_API_URL: ${{ secrets.PHASE3_API_URL }}
+          PHASE3_API_KEY: ${{ secrets.PHASE3_API_KEY }}
           PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         run: |
           echo "🔍 Starting Security Paranoia Bot Analysis..."
@@ -56,6 +68,7 @@ jobs:
           echo "PR Number: ${PR_NUMBER}"
           echo "Deep Scan: ${ENABLE_DEEP_SCAN}"
           echo "AI Analysis: ${ENABLE_AI_ANALYSIS}"
+          echo "ML Features: ${ENABLE_ML_FEATURES}"
           echo ""
           
           # Define all vulnerability patterns with line-specific details
@@ -192,7 +205,8 @@ jobs:
               "high": $HIGH_COUNT,
               "medium": $MEDIUM_COUNT,
               "analysisTime": "$(date -Iseconds)",
-              "aiAnalysisEnabled": ${ENABLE_AI_ANALYSIS}
+              "aiAnalysisEnabled": ${ENABLE_AI_ANALYSIS},
+              "mlFeaturesEnabled": ${ENABLE_ML_FEATURES}
             }
           }
           EOF
@@ -213,6 +227,54 @@ jobs:
             echo "FINAL_EXIT_CODE=0" >> $GITHUB_ENV
           fi
       
+      - name: Phase 3 ML Analysis
+        if: always() && inputs.enable_ml_features && (github.event_name == 'pull_request' || inputs.pr_number)
+        continue-on-error: true
+        env:
+          PHASE3_API_URL: ${{ secrets.PHASE3_API_URL }}
+          PHASE3_API_KEY: ${{ secrets.PHASE3_API_KEY }}
+        run: |
+          echo "🤖 Running Phase 3 ML Analysis..."
+          
+          # Check if Phase 3 API is configured
+          if [[ -z "$PHASE3_API_URL" ]] || [[ -z "$PHASE3_API_KEY" ]]; then
+            echo "⚠️ Phase 3 API not configured. Skipping ML analysis."
+            exit 0
+          fi
+          
+          # Prepare files for ML analysis
+          FILES_JSON=$(find . -type f \( -name "*.js" -o -name "*.ts" -o -name "*.jsx" -o -name "*.tsx" \) -not -path "./node_modules/*" -not -path "./.git/*" | head -20 | jq -R -s -c 'split("\n")[:-1] | map({path: ., content: "placeholder"})')
+          
+          # Get vulnerabilities from previous step
+          VULNS_JSON=$(cat vulnerability-details.json | jq -c '.')
+          
+          # Call Phase 3 API
+          ML_RESPONSE=$(curl -s -X POST "${PHASE3_API_URL}/api/analyze-pr" \
+            -H "X-API-Key: ${PHASE3_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"files\": [],
+              \"vulnerabilities\": ${VULNS_JSON}
+            }" || echo "{\"error\": \"API call failed\"}")
+          
+          echo "$ML_RESPONSE" > ml-analysis-results.json
+          
+          # Check if ML analysis was successful
+          if echo "$ML_RESPONSE" | jq -e '.suggestions' > /dev/null 2>&1; then
+            echo "✅ ML Analysis completed successfully"
+            
+            # Extract key insights
+            ANOMALY_COUNT=$(echo "$ML_RESPONSE" | jq '.anomalies | length' || echo "0")
+            HISTORICAL_MATCHES=$(echo "$ML_RESPONSE" | jq '.historicalContext | length' || echo "0")
+            
+            echo "📊 ML Insights:"
+            echo "- Anomalies detected: $ANOMALY_COUNT"
+            echo "- Historical similar incidents: $HISTORICAL_MATCHES"
+            echo "- Risk assessment available: $(echo "$ML_RESPONSE" | jq -r '.riskAssessment != null')"
+          else
+            echo "⚠️ ML Analysis returned no results or failed"
+          fi
+      
       - name: Upload Security Report
         if: always()
         uses: actions/upload-artifact@v4
@@ -221,6 +283,7 @@ jobs:
           path: |
             security-report.json
             vulnerability-details.json
+            ml-analysis-results.json
           retention-days: 30
       
       - name: Post Summary Comment
@@ -239,6 +302,15 @@ jobs:
               return;
             }
             
+            let mlResults = null;
+            try {
+              if (fs.existsSync('ml-analysis-results.json')) {
+                mlResults = JSON.parse(fs.readFileSync('ml-analysis-results.json', 'utf8'));
+              }
+            } catch (error) {
+              console.error('Failed to read ML results:', error);
+            }
+            
             const { summary } = report;
             
             // Create status emoji based on severity
@@ -250,6 +322,38 @@ jobs:
             } else if (summary.high > 10) {
               statusEmoji = '⚠️';
               statusText = 'WARNING';
+            }
+            
+            // Build ML insights section
+            let mlInsights = '';
+            if (mlResults && !mlResults.error) {
+              const anomalyCount = mlResults.anomalies?.length || 0;
+              const historicalCount = mlResults.historicalContext?.length || 0;
+              const hasRiskAssessment = !!mlResults.riskAssessment;
+              
+              mlInsights = `
+            ### 🧠 **Phase 3 ML Analysis**
+            ${summary.mlFeaturesEnabled ? '✅ **Enabled**' : '❌ **Disabled**'}
+            
+            ${summary.mlFeaturesEnabled && mlResults ? `
+            #### 📊 **ML-Powered Insights**:
+            - **Anomalies Detected**: ${anomalyCount} unusual patterns found
+            - **Historical Context**: ${historicalCount} similar incidents from Security Time Machine
+            - **Risk Assessment**: ${hasRiskAssessment ? '✅ Available' : '❌ Not available'}
+            - **AI Suggestions**: Enhanced fix recommendations powered by context-aware ML
+            
+            ${anomalyCount > 0 ? `
+            ⚠️ **Anomaly Alert**: The ML system detected ${anomalyCount} unusual security patterns that may indicate:
+            - Zero-day vulnerabilities
+            - Novel attack vectors
+            - Business logic flaws
+            ` : ''}
+            
+            ${historicalCount > 0 ? `
+            📚 **Historical Insights**: Found ${historicalCount} similar security incidents in the organization's history.
+            These can provide valuable context for fixing the current vulnerabilities.
+            ` : ''}
+            ` : '⚠️ ML analysis unavailable. Configure PHASE3_API_URL and PHASE3_API_KEY for enhanced detection.'}`;
             }
             
             const comment = `## ${statusEmoji} **Security Paranoia Bot Analysis Report**
@@ -267,6 +371,8 @@ jobs:
             
             ### 🤖 **AI-Enhanced Analysis**
             ${summary.aiAnalysisEnabled ? '✅ **Enabled** - Gemini AI provided context-aware analysis and fix suggestions' : '❌ **Disabled** - Pattern-based detection only'}
+            
+            ${mlInsights}
             
             ### 📋 **Next Steps**
             
@@ -290,6 +396,7 @@ jobs:
             - Specific vulnerability description
             - Security impact explanation
             - Recommended fix with code examples
+            ${mlResults && !mlResults.error ? '- ML-enhanced suggestions based on historical data' : ''}
             
             Please review all inline comments in the "Files changed" tab above.
             
@@ -298,6 +405,7 @@ jobs:
             > 🤖 **Security Paranoia Bot** powered by SiYuan Organization
             > 
             > 📊 **Analysis Details**: ${summary.totalVulnerabilities} vulnerabilities found with line-by-line annotations
+            > ${summary.mlFeaturesEnabled ? '🧠 **ML Features**: Phase 3 ML analysis active' : ''}
             > 
             > 🔗 **View Full Report**: Check the workflow artifacts for detailed analysis
             `;
@@ -333,6 +441,16 @@ jobs:
               return;
             }
             
+            // Read ML results if available
+            let mlResults = null;
+            try {
+              if (fs.existsSync('ml-analysis-results.json')) {
+                mlResults = JSON.parse(fs.readFileSync('ml-analysis-results.json', 'utf8'));
+              }
+            } catch (error) {
+              console.error('Failed to read ML results:', error);
+            }
+            
             const prNumber = context.payload.pull_request?.number || parseInt('${{ inputs.pr_number }}');
             if (!prNumber) {
               console.log('No PR number found');
@@ -358,10 +476,10 @@ jobs:
             
             const prFiles = new Set(files.data.map(f => f.filename));
             
-            // Comment templates with significant variety to avoid abuse detection
+            // Comment templates with ML enhancements
             const commentTemplates = [
               {
-                template: (vuln) => `### 🚨 ${vuln.severity.toUpperCase()} SECURITY ALERT: ${vuln.type}
+                template: (vuln, mlSuggestion) => `### 🚨 ${vuln.severity.toUpperCase()} SECURITY ALERT: ${vuln.type}
             
             **Issue in line above:**
             ${vuln.message}
@@ -373,11 +491,16 @@ jobs:
             ${vuln.fix}
             \`\`\`
             
+            ${mlSuggestion ? `
+            **🧠 ML-Enhanced Suggestion:**
+            ${mlSuggestion}
+            ` : ''}
+            
             ${vuln.severity === 'critical' ? '⚠️ **URGENT:** This must be addressed before production deployment!' : vuln.severity === 'high' ? '⚠️ **IMPORTANT:** Please prioritize fixing this security issue.' : '📝 **NOTE:** Consider addressing this security concern.'}`,
                 weight: 4
               },
               {
-                template: (vuln) => `## ⛔ Security Vulnerability Found: ${vuln.type}
+                template: (vuln, mlSuggestion) => `## ⛔ Security Vulnerability Found: ${vuln.type}
             
             **Severity Level:** ${vuln.severity.charAt(0).toUpperCase() + vuln.severity.slice(1)}
             
@@ -389,92 +512,32 @@ jobs:
             ${vuln.fix}
             \`\`\`
             
+            ${mlSuggestion ? `
+            **🤖 AI-Powered Insight:**
+            ${mlSuggestion}
+            ` : ''}
+            
             This security flaw requires ${vuln.severity === 'critical' ? 'immediate' : vuln.severity === 'high' ? 'prompt' : 'eventual'} attention to prevent potential exploitation.`,
                 weight: 3
-              },
-              {
-                template: (vuln) => `🔥 **SECURITY ISSUE DETECTED**
-            
-            I've identified a ${vuln.severity}-severity security vulnerability in the code above:
-            
-            **Problem:** ${vuln.type} vulnerability
-            **Details:** ${vuln.message}
-            
-            **Recommended Solution:**
-            \`\`\`javascript
-            ${vuln.fix}
-            \`\`\`
-            
-            ${vuln.severity === 'critical' ? 'Please prioritize fixing this critical security issue.' : vuln.severity === 'high' ? 'This high-priority security issue should be addressed soon.' : 'Please consider addressing this security concern.'}`,
-                weight: 3
-              },
-              {
-                template: (vuln) => `## Security Review Finding
-            
-            During my analysis, I discovered a ${vuln.type} vulnerability with ${vuln.severity} severity in the preceding line.
-            
-            **Vulnerability Analysis:**
-            ${vuln.message}
-            
-            **Mitigation Strategy:**
-            \`\`\`javascript
-            ${vuln.fix}
-            \`\`\`
-            
-            This vulnerability ${vuln.severity === 'critical' ? 'poses significant security risks and should be resolved immediately.' : vuln.severity === 'high' ? 'should be addressed to maintain security standards.' : 'should be considered for resolution.'}`,
-                weight: 2
-              },
-              {
-                template: (vuln) => `🛡️ **Security Concern Identified Above**
-            
-            **Type:** ${vuln.type}  
-            **Risk Level:** ${vuln.severity.toUpperCase()}
-            
-            **Analysis:** ${vuln.message}
-            
-            **Fix Recommendation:**
-            \`\`\`javascript
-            ${vuln.fix}
-            \`\`\`
-            
-            ${vuln.severity === 'critical' ? '🚨 Critical vulnerabilities require immediate action!' : vuln.severity === 'high' ? '⚠️ High-risk vulnerabilities should be prioritized.' : '📋 Medium-risk vulnerabilities should be tracked for resolution.'}`,
-                weight: 2
-              },
-              {
-                template: (vuln) => `### Security Scanner Alert
-            
-            **Detected Issue:** ${vuln.type} on the line above
-            **Severity Classification:** ${vuln.severity}
-            
-            **Problem Description:**
-            ${vuln.message}
-            
-            **Suggested Resolution:**
-            \`\`\`javascript
-            ${vuln.fix}
-            \`\`\`
-            
-            Security scanner recommends ${vuln.severity === 'critical' ? 'immediate remediation of this critical vulnerability.' : vuln.severity === 'high' ? 'prompt resolution of this high-risk issue.' : 'addressing this security finding when possible.'}`,
-                weight: 2
-              },
-              {
-                template: (vuln) => `🔍 **Vulnerability Assessment Result**
-            
-            I found a potential security issue in the preceding line during code analysis:
-            
-            - **Vulnerability:** ${vuln.type}
-            - **Risk Rating:** ${vuln.severity.toUpperCase()}
-            - **Issue:** ${vuln.message}
-            
-            **Proposed Fix:**
-            \`\`\`javascript
-            ${vuln.fix}
-            \`\`\`
-            
-            ${vuln.severity === 'critical' ? 'This critical finding requires urgent attention.' : vuln.severity === 'high' ? 'This high-severity issue should be addressed promptly.' : 'This medium-risk issue should be considered for future fixes.'}`,
-                weight: 1
               }
             ];
+            
+            // Function to get ML suggestion for a vulnerability
+            function getMLSuggestion(vuln, file) {
+              if (!mlResults || !mlResults.suggestions) return null;
+              
+              // Find matching suggestion
+              const suggestions = mlResults.suggestions.find(s => 
+                s.vulnerabilityId === `${file}-${vuln.line}` || 
+                (s.file === file && s.line === vuln.line)
+              );
+              
+              if (suggestions && suggestions.suggestions && suggestions.suggestions.length > 0) {
+                return suggestions.suggestions[0].description || suggestions.suggestions[0];
+              }
+              
+              return null;
+            }
             
             // Function to get random template based on weights
             function getRandomTemplate() {
@@ -502,7 +565,8 @@ jobs:
               // Include ALL vulnerabilities (critical, high, and medium)
               for (const vuln of fileVulns) {
                 const template = getRandomTemplate();
-                const comment = template(vuln);
+                const mlSuggestion = getMLSuggestion(vuln, filename);
+                const comment = template(vuln, mlSuggestion);
                 
                 // Comment AFTER the vulnerable line (line + 1) to provide context about what was just seen
                 allComments.push({
@@ -519,6 +583,9 @@ jobs:
             const totalComments = allComments.length;
             console.log(`Posting ${totalComments} vulnerability comments (ALL detected vulnerabilities as requested)`);
             console.log('Comments will be positioned AFTER each vulnerable line (not on the line itself)');
+            if (mlResults && !mlResults.error) {
+              console.log('ML-enhanced suggestions are available and will be included');
+            }
             
             if (totalComments === 0) {
               console.log('No vulnerabilities found in PR files');
@@ -605,6 +672,9 @@ jobs:
             
             if (successfulComments > 0) {
               console.log('\n🎯 Successfully posted inline comments AFTER all detected vulnerable lines!');
+              if (mlResults && !mlResults.error) {
+                console.log('🧠 ML-enhanced suggestions were included where available');
+              }
             } else if (failedComments > 0) {
               console.log('\n⚠️ All vulnerability comments failed to post. This might be due to abuse detection or API limits.');
               console.log('Consider running the workflow again later or checking for API rate limits.');
