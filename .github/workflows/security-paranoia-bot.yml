@@ -52,7 +52,7 @@ jobs:
       - name: Checkout Security Paranoia Bot
         uses: actions/checkout@v4
         with:
-          repository: 'storehubnet/security-paranoia-bot'
+          repository: 'storehubai/security-paranoia-bot'
           path: 'security-bot'
           ref: 'main'
       
