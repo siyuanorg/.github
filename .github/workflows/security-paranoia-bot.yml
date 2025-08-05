@@ -1,4 +1,4 @@
-name: Security Paranoia Bot - Dynamic Analysis
+name: Security Paranoia Bot - Local Analysis
 
 on:
   workflow_call:
@@ -22,11 +22,6 @@ on:
         required: false
         type: boolean
         default: true
-      bot_api_url:
-        description: 'Security Paranoia Bot API URL (defaults to public instance)'
-        required: false
-        type: string
-        default: 'https://security-paranoia-bot.storehubnet.com'
     secrets:
       GEMINI_API_KEY:
         required: false
@@ -48,15 +43,42 @@ jobs:
       security-events: write
     
     steps:
-      - name: Checkout repository
+      - name: Checkout target repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ github.token }}
+          path: 'target-repo'
       
-      - name: Dynamic Security Analysis
-        id: security-scan
+      - name: Checkout Security Paranoia Bot
+        uses: actions/checkout@v4
+        with:
+          repository: 'storehubnet/security-paranoia-bot'
+          path: 'security-bot'
+          ref: 'main'
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: 'security-bot/package-lock.json'
+      
+      - name: Install Security Bot Dependencies
+        working-directory: security-bot
+        run: |
+          echo "📦 Installing dependencies..."
+          npm ci
+      
+      - name: Build Security Bot
+        working-directory: security-bot
+        run: |
+          echo "🔨 Building Security Paranoia Bot..."
+          npm run build || echo "No build script found, continuing..."
+      
+      - name: Run Local Security Analysis
+        id: security_scan
         continue-on-error: true
+        working-directory: security-bot
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -67,53 +89,145 @@ jobs:
           PHASE3_API_URL: ${{ secrets.PHASE3_API_URL }}
           PHASE3_API_KEY: ${{ secrets.PHASE3_API_KEY }}
           PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
-          BOT_API_URL: ${{ inputs.bot_api_url }}
+          TARGET_REPO_PATH: ${{ github.workspace }}/target-repo
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
         run: |
-          echo "🔍 Starting Security Paranoia Bot Dynamic Analysis..."
+          echo "🔍 Starting Local Security Analysis..."
           echo "Repository: ${{ github.repository }}"
           echo "PR Number: ${PR_NUMBER}"
-          echo "Deep Scan: ${ENABLE_DEEP_SCAN}"
-          echo "AI Analysis: ${ENABLE_AI_ANALYSIS}"
-          echo "ML Features: ${ENABLE_ML_FEATURES}"
-          echo "Bot API: ${BOT_API_URL}"
-          echo ""
+          echo "Target Path: ${TARGET_REPO_PATH}"
           
-          # Extract owner and repo from current repository
-          OWNER="${{ github.repository_owner }}"
-          REPO="${{ github.event.repository.name }}"
+          # Create output directory
+          mkdir -p analysis-output
           
-          echo "📡 Calling Security Paranoia Bot API..."
-          echo "Owner: $OWNER"
-          echo "Repo: $REPO"
+          # Run the analysis directly
+          if [[ -f "src/cli.ts" ]]; then
+            echo "Running TypeScript CLI..."
+            npx ts-node src/cli.ts analyze-pr \
+              --owner "${REPO_OWNER}" \
+              --repo "${REPO_NAME}" \
+              --pr-number "${PR_NUMBER}" \
+              --local-path "${TARGET_REPO_PATH}" \
+              --output "analysis-output/results.json" \
+              ${ENABLE_AI_ANALYSIS:+--enable-ai} \
+              ${ENABLE_DEEP_SCAN:+--enable-deep-scan} \
+              ${ENABLE_ML_FEATURES:+--enable-ml}
+          else
+            echo "TypeScript CLI not found, trying JavaScript..."
+            
+            # Alternative: Run the bot directly with node
+            cat > run-analysis.js << 'EOF'
+          const { PullRequestAnalyzer } = require('./src/integrations/github/PullRequestAnalyzer');
+          const { AttackEngine } = require('./src/attack-engine/AttackEngine');
+          const { MongoDBFuzzer } = require('./src/mongodb-fuzzer/MongoDBFuzzer');
+          const { Octokit } = require('@octokit/rest');
+          const fs = require('fs');
+          const path = require('path');
           
-          # Call Security Paranoia Bot API to analyze the PR
-          ANALYSIS_RESPONSE=$(curl -s -X POST "${BOT_API_URL}/api/analyze-pr" \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -d "{
-              \"owner\": \"$OWNER\",
-              \"repo\": \"$REPO\",
-              \"prNumber\": ${PR_NUMBER},
-              \"enableAI\": ${ENABLE_AI_ANALYSIS},
-              \"enableML\": ${ENABLE_ML_FEATURES},
-              \"enableDeepScan\": ${ENABLE_DEEP_SCAN}
-            }" || echo '{"error": "API call failed", "message": "Could not connect to Security Paranoia Bot API"}')
+          async function runLocalAnalysis() {
+            const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+            const attackEngine = new AttackEngine();
+            const mongoFuzzer = new MongoDBFuzzer();
+            const analyzer = new PullRequestAnalyzer(octokit, attackEngine, mongoFuzzer);
+            
+            // Get PR files
+            const prNumber = parseInt(process.env.PR_NUMBER);
+            const owner = process.env.REPO_OWNER;
+            const repo = process.env.REPO_NAME;
+            
+            console.log(`Analyzing PR #${prNumber} in ${owner}/${repo}`);
+            
+            try {
+              // Get PR files from GitHub
+              const { data: files } = await octokit.pulls.listFiles({
+                owner,
+                repo,
+                pull_number: prNumber,
+                per_page: 100
+              });
+              
+              console.log(`Found ${files.length} files in PR`);
+              
+              // Analyze each file
+              const vulnerabilitiesByFile = {};
+              let totalVulnerabilities = 0;
+              let criticalCount = 0;
+              let highCount = 0;
+              let mediumCount = 0;
+              let lowCount = 0;
+              
+              for (const file of files) {
+                if (file.status === 'removed') continue;
+                
+                const filePath = path.join(process.env.TARGET_REPO_PATH, file.filename);
+                
+                if (fs.existsSync(filePath)) {
+                  const content = fs.readFileSync(filePath, 'utf8');
+                  console.log(`Analyzing ${file.filename}...`);
+                  
+                  const results = await attackEngine.analyzeCode(content, file.filename);
+                  
+                  if (results && results.length > 0) {
+                    vulnerabilitiesByFile[file.filename] = results.map(r => ({
+                      line: r.location?.line || 1,
+                      type: r.type || r.vulnerability,
+                      severity: r.severity || 'medium',
+                      message: r.description || r.message,
+                      fix: r.recommendation || r.fix || 'Review and fix this vulnerability'
+                    }));
+                    
+                    totalVulnerabilities += results.length;
+                    results.forEach(r => {
+                      const severity = r.severity || 'medium';
+                      if (severity === 'critical') criticalCount++;
+                      else if (severity === 'high') highCount++;
+                      else if (severity === 'medium') mediumCount++;
+                      else lowCount++;
+                    });
+                  }
+                }
+              }
+              
+              // Save results
+              const results = {
+                vulnerabilitiesByFile,
+                totalVulnerabilities,
+                criticalCount,
+                highCount,
+                mediumCount,
+                lowCount,
+                analysisTime: Date.now()
+              };
+              
+              fs.writeFileSync('analysis-output/results.json', JSON.stringify(results, null, 2));
+              console.log(`Analysis complete: ${totalVulnerabilities} vulnerabilities found`);
+              
+            } catch (error) {
+              console.error('Analysis failed:', error);
+              process.exit(1);
+            }
+          }
           
-          echo "$ANALYSIS_RESPONSE" > analysis-response.json
+          runLocalAnalysis();
+          EOF
+            
+            node run-analysis.js
+          fi
           
-          # Check if we got a valid response
-          if echo "$ANALYSIS_RESPONSE" | jq -e '.vulnerabilitiesByFile' > /dev/null 2>&1; then
+          # Check if analysis was successful
+          if [[ -f "analysis-output/results.json" ]]; then
             echo "✅ Analysis completed successfully"
             
-            # Extract vulnerabilities
-            echo "$ANALYSIS_RESPONSE" | jq '.vulnerabilitiesByFile' > vulnerability-details.json
+            # Parse results
+            RESULTS=$(cat analysis-output/results.json)
             
-            # Count vulnerabilities
-            TOTAL_VULNERABILITIES=$(echo "$ANALYSIS_RESPONSE" | jq '.totalVulnerabilities // 0')
-            CRITICAL_COUNT=$(echo "$ANALYSIS_RESPONSE" | jq '.criticalCount // 0')
-            HIGH_COUNT=$(echo "$ANALYSIS_RESPONSE" | jq '.highCount // 0')
-            MEDIUM_COUNT=$(echo "$ANALYSIS_RESPONSE" | jq '.mediumCount // 0')
-            LOW_COUNT=$(echo "$ANALYSIS_RESPONSE" | jq '.lowCount // 0')
+            # Extract counts
+            TOTAL_VULNERABILITIES=$(echo "$RESULTS" | jq '.totalVulnerabilities // 0')
+            CRITICAL_COUNT=$(echo "$RESULTS" | jq '.criticalCount // 0')
+            HIGH_COUNT=$(echo "$RESULTS" | jq '.highCount // 0')
+            MEDIUM_COUNT=$(echo "$RESULTS" | jq '.mediumCount // 0')
+            LOW_COUNT=$(echo "$RESULTS" | jq '.lowCount // 0')
             
             echo ""
             echo "📊 VULNERABILITY SUMMARY"
@@ -123,34 +237,13 @@ jobs:
             echo "🟠 High: $HIGH_COUNT"
             echo "🟡 Medium: $MEDIUM_COUNT"
             echo "🟢 Low: $LOW_COUNT"
-            echo ""
             
-            # Extract auto-fixes if available
-            if echo "$ANALYSIS_RESPONSE" | jq -e '.autoFixes' > /dev/null 2>&1; then
-              echo "$ANALYSIS_RESPONSE" | jq '.autoFixes' > auto-fixes.json
-              AUTO_FIX_COUNT=$(echo "$ANALYSIS_RESPONSE" | jq '.autoFixes | length')
-              echo "🔧 Auto-fixes available: $AUTO_FIX_COUNT"
-            fi
+            # Copy results to workspace
+            cp analysis-output/results.json ${{ github.workspace }}/vulnerability-details.json
+            echo "$RESULTS" | jq '.vulnerabilitiesByFile' > ${{ github.workspace }}/vulnerabilities-by-file.json
             
-          else
-            echo "⚠️ Analysis failed or returned no results"
-            ERROR_MSG=$(echo "$ANALYSIS_RESPONSE" | jq -r '.message // .error // "Unknown error"')
-            echo "Error: $ERROR_MSG"
-            
-            # Create empty reports for downstream steps
-            echo '{}' > vulnerability-details.json
-            echo '[]' > auto-fixes.json
-            
-            # Set default values
-            TOTAL_VULNERABILITIES=0
-            CRITICAL_COUNT=0
-            HIGH_COUNT=0
-            MEDIUM_COUNT=0
-            LOW_COUNT=0
-          fi
-          
-          # Generate security report
-          cat > security-report.json << EOF
+            # Generate report
+            cat > ${{ github.workspace }}/security-report.json << EOF
           {
             "summary": {
               "totalVulnerabilities": ${TOTAL_VULNERABILITIES},
@@ -165,16 +258,21 @@ jobs:
             }
           }
           EOF
-          
-          echo "💾 Security report saved"
-          
-          # Determine build status
-          if [[ $CRITICAL_COUNT -gt 0 ]]; then
-            echo "❌ BUILD FAILED: $CRITICAL_COUNT critical vulnerabilities detected"
-            echo "build_status=failure" >> $GITHUB_OUTPUT
-            echo "FINAL_EXIT_CODE=1" >> $GITHUB_ENV
+            
+            # Set build status
+            if [[ $CRITICAL_COUNT -gt 0 ]]; then
+              echo "❌ BUILD FAILED: $CRITICAL_COUNT critical vulnerabilities detected"
+              echo "build_status=failure" >> $GITHUB_OUTPUT
+              echo "FINAL_EXIT_CODE=1" >> $GITHUB_ENV
+            else
+              echo "✅ BUILD PASSED: No critical vulnerabilities"
+              echo "build_status=success" >> $GITHUB_OUTPUT
+              echo "FINAL_EXIT_CODE=0" >> $GITHUB_ENV
+            fi
           else
-            echo "✅ BUILD PASSED: No critical vulnerabilities"
+            echo "❌ Analysis failed - no results file found"
+            echo '{"vulnerabilitiesByFile": {}}' > ${{ github.workspace }}/vulnerability-details.json
+            echo '{"summary": {"totalVulnerabilities": 0}}' > ${{ github.workspace }}/security-report.json
             echo "build_status=success" >> $GITHUB_OUTPUT
             echo "FINAL_EXIT_CODE=0" >> $GITHUB_ENV
           fi
@@ -188,14 +286,12 @@ jobs:
         run: |
           echo "🤖 Running Phase 3 ML Analysis..."
           
-          # Check if Phase 3 API is configured
           if [[ -z "$PHASE3_API_URL" ]] || [[ -z "$PHASE3_API_KEY" ]]; then
             echo "⚠️ Phase 3 API not configured. Skipping ML analysis."
             echo '{"error": "Phase 3 API not configured"}' > ml-analysis-results.json
             exit 0
           fi
           
-          # Get vulnerabilities from previous step
           if [[ ! -f vulnerability-details.json ]] || [[ "$(cat vulnerability-details.json)" == "{}" ]]; then
             echo "⚠️ No vulnerabilities to analyze"
             echo '{"error": "No vulnerabilities found"}' > ml-analysis-results.json
@@ -204,7 +300,6 @@ jobs:
           
           VULNS_JSON=$(cat vulnerability-details.json | jq -c '.')
           
-          # Call Phase 3 API
           ML_RESPONSE=$(curl -s -X POST "${PHASE3_API_URL}/api/analyze-pr" \
             -H "X-API-Key: ${PHASE3_API_KEY}" \
             -H "Content-Type: application/json" \
@@ -216,18 +311,15 @@ jobs:
           
           echo "$ML_RESPONSE" > ml-analysis-results.json
           
-          # Check if ML analysis was successful
           if echo "$ML_RESPONSE" | jq -e '.suggestions' > /dev/null 2>&1; then
             echo "✅ ML Analysis completed successfully"
             
-            # Extract key insights
             ANOMALY_COUNT=$(echo "$ML_RESPONSE" | jq '.anomalies | length' || echo "0")
             HISTORICAL_MATCHES=$(echo "$ML_RESPONSE" | jq '.historicalContext | length' || echo "0")
             
             echo "📊 ML Insights:"
             echo "- Anomalies detected: $ANOMALY_COUNT"
             echo "- Historical similar incidents: $HISTORICAL_MATCHES"
-            echo "- Risk assessment: $(echo "$ML_RESPONSE" | jq -r '.riskAssessment.level // "Not available"')"
           else
             echo "⚠️ ML Analysis returned no results or failed"
           fi
@@ -238,10 +330,9 @@ jobs:
         with:
           name: security-analysis-report
           path: |
-            analysis-response.json
             security-report.json
             vulnerability-details.json
-            auto-fixes.json
+            vulnerabilities-by-file.json
             ml-analysis-results.json
           retention-days: 30
       
@@ -253,14 +344,10 @@ jobs:
           script: |
             const fs = require('fs');
             
-            // Read all reports
-            let report, vulnerabilities, autoFixes, mlResults;
+            let report, vulnerabilities, mlResults;
             try {
               report = JSON.parse(fs.readFileSync('security-report.json', 'utf8'));
-              vulnerabilities = JSON.parse(fs.readFileSync('vulnerability-details.json', 'utf8'));
-              if (fs.existsSync('auto-fixes.json')) {
-                autoFixes = JSON.parse(fs.readFileSync('auto-fixes.json', 'utf8'));
-              }
+              vulnerabilities = JSON.parse(fs.readFileSync('vulnerabilities-by-file.json', 'utf8'));
               if (fs.existsSync('ml-analysis-results.json')) {
                 mlResults = JSON.parse(fs.readFileSync('ml-analysis-results.json', 'utf8'));
               }
@@ -271,7 +358,6 @@ jobs:
             
             const { summary } = report;
             
-            // Create status emoji based on severity
             let statusEmoji = '✅';
             let statusText = 'PASSED';
             if (summary.critical > 0) {
@@ -282,7 +368,6 @@ jobs:
               statusText = 'WARNING';
             }
             
-            // Build ML insights section
             let mlInsights = '';
             if (mlResults && !mlResults.error && summary.mlFeaturesEnabled) {
               const anomalyCount = mlResults.anomalies?.length || 0;
@@ -301,25 +386,9 @@ jobs:
             
             ${historicalCount > 0 ? `
             📚 **Historical Context**: Found ${historicalCount} similar incidents in organizational history
-            - These provide valuable context for remediation
-            - Learn from past security incidents
             ` : ''}
             
-            ${riskLevel !== 'Unknown' ? `
-            📊 **Risk Assessment**: ${riskLevel}
-            ` : ''}`;
-            }
-            
-            // Build auto-fix section
-            let autoFixSection = '';
-            if (autoFixes && Array.isArray(autoFixes) && autoFixes.length > 0) {
-              autoFixSection = `
-            ### 🔧 **Automated Fixes Available**
-            
-            The Security Paranoia Bot can automatically fix ${autoFixes.length} vulnerabilities:
-            - Run with \`--auto-fix\` flag to apply fixes
-            - Review proposed changes before merging
-            `;
+            ${riskLevel !== 'Unknown' ? `📊 **Risk Assessment**: ${riskLevel}` : ''}`;
             }
             
             const comment = `## ${statusEmoji} **Security Paranoia Bot Analysis Report**
@@ -342,8 +411,6 @@ jobs:
             - **ML Features**: ${summary.mlFeaturesEnabled ? '✅ Enabled (anomaly detection)' : '❌ Disabled'}
             
             ${mlInsights}
-            
-            ${autoFixSection}
             
             ### 📋 **Next Steps**
             
@@ -376,14 +443,13 @@ jobs:
             
             ---
             
-            > 🤖 **Security Paranoia Bot** - Dynamic vulnerability analysis powered by SiYuan Organization
+            > 🤖 **Security Paranoia Bot** - Local vulnerability analysis powered by SiYuan Organization
             > 
             > 📊 **Scanned**: ${Object.keys(vulnerabilities || {}).length} files | **Found**: ${summary.totalVulnerabilities} vulnerabilities
             > 
             > 🔗 **Report Artifacts**: Available in workflow run artifacts
             `;
             
-            // Post summary comment
             const issueNumber = context.payload.pull_request?.number || 
                                parseInt('${{ inputs.pr_number }}') || 
                                context.issue.number;
@@ -407,10 +473,9 @@ jobs:
           script: |
             const fs = require('fs');
             
-            // Read vulnerability details
             let vulnerabilities;
             try {
-              vulnerabilities = JSON.parse(fs.readFileSync('vulnerability-details.json', 'utf8'));
+              vulnerabilities = JSON.parse(fs.readFileSync('vulnerabilities-by-file.json', 'utf8'));
             } catch (error) {
               console.error('Failed to read vulnerability details:', error);
               return;
@@ -421,7 +486,6 @@ jobs:
               return;
             }
             
-            // Read ML results if available
             let mlResults = null;
             try {
               if (fs.existsSync('ml-analysis-results.json')) {
@@ -437,7 +501,6 @@ jobs:
               return;
             }
             
-            // Get PR details
             const pr = await github.rest.pulls.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -446,7 +509,6 @@ jobs:
             
             const commitSha = pr.data.head.sha;
             
-            // Get PR files
             const files = await github.rest.pulls.listFiles({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -456,7 +518,6 @@ jobs:
             
             const prFiles = new Set(files.data.map(f => f.filename));
             
-            // Helper function to get ML suggestion
             function getMLSuggestion(vuln, filename) {
               if (!mlResults || !mlResults.suggestions) return null;
               
@@ -468,7 +529,6 @@ jobs:
               return suggestion?.description || suggestion?.suggestions?.[0] || null;
             }
             
-            // Prepare comments
             const comments = [];
             for (const [filename, fileVulns] of Object.entries(vulnerabilities)) {
               if (!prFiles.has(filename)) {
@@ -501,7 +561,7 @@ jobs:
                 
                 comments.push({
                   path: filename,
-                  line: vuln.line,
+                  line: vuln.line || 1,
                   side: 'RIGHT',
                   body: body
                 });
@@ -515,7 +575,6 @@ jobs:
               return;
             }
             
-            // Post comments in batches to avoid rate limits
             const BATCH_SIZE = 10;
             const DELAY_MS = 2000;
             
@@ -523,7 +582,6 @@ jobs:
               const batch = comments.slice(i, i + BATCH_SIZE);
               
               try {
-                // Create review with comments
                 await github.rest.pulls.createReview({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
@@ -535,14 +593,12 @@ jobs:
                 
                 console.log(`Posted ${batch.length} comments (${i + batch.length}/${comments.length})`);
                 
-                // Delay between batches
                 if (i + BATCH_SIZE < comments.length) {
                   await new Promise(resolve => setTimeout(resolve, DELAY_MS));
                 }
               } catch (error) {
                 console.error(`Failed to post batch starting at ${i}:`, error.message);
                 
-                // Try posting comments individually as fallback
                 for (const comment of batch) {
                   try {
                     await github.rest.pulls.createReviewComment({
@@ -568,7 +624,6 @@ jobs:
       - name: Set Final Exit Code
         if: always()
         run: |
-          # Use the exit code from security analysis
           if [[ "${FINAL_EXIT_CODE:-0}" == "1" ]]; then
             echo "❌ Workflow failing due to critical vulnerabilities"
             exit 1
