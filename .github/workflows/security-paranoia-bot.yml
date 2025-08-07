@@ -57,8 +57,9 @@ jobs:
         run: |
           echo "📦 Installing security analysis dependencies..."
           npm init -y
+          # Use an older version of @octokit/rest that supports CommonJS
           npm install --save-dev \
-            @octokit/rest \
+            @octokit/rest@19.0.13 \
             js-yaml \
             eslint \
             eslint-plugin-security \
